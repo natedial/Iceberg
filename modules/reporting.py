@@ -121,8 +121,10 @@ def generate_text_analysis_report(analysis_results: Dict[str, Any]) -> str:
     report.append(f"Overall Intent: {intent['overall_intent'].upper()}")
     report.append(f"Hawkish Score: {intent['hawkish_score']:.2f}")
     report.append(f"Dovish Score: {intent['dovish_score']:.2f}")
-    report.append(f"Hawkish Terms Found: {intent['hawkish_terms_found']}")
-    report.append(f"Dovish Terms Found: {intent['dovish_terms_found']}")
+    if 'hawkish_terms_found' in intent:
+        report.append(f"Hawkish Terms Found: {intent['hawkish_terms_found']}")
+    if 'dovish_terms_found' in intent:
+        report.append(f"Dovish Terms Found: {intent['dovish_terms_found']}")
     report.append("")
     
     # Add key phrases
@@ -187,8 +189,8 @@ def generate_text_comparison_report(comparison_results: Dict[str, Any]) -> str:
     phrase_changes = comparison_results["phrase_changes"]
     report.append("PHRASE CHANGES")
     report.append("=" * 20)
-    report.append(f"Additions: {phrase_changes['addition_count']}")
-    report.append(f"Deletions: {phrase_changes['deletion_count']}")
+    report.append(f"Additions: {len(phrase_changes['additions'])}")
+    report.append(f"Deletions: {len(phrase_changes['deletions'])}")
     report.append("")
     
     # Add top 5 additions
@@ -207,17 +209,20 @@ def generate_text_comparison_report(comparison_results: Dict[str, Any]) -> str:
     sentence_changes = comparison_results["sentence_changes"]
     report.append("SENTENCE CHANGES")
     report.append("=" * 20)
-    report.append(f"Total Changes: {len(sentence_changes)}")
     
-    # Add top 5 sentence changes
-    for i, change in enumerate(sentence_changes[:5], 1):
-        report.append(f"\nChange {i}:")
-        if change["type"] == "replace":
+    # Filter for only significant changes (not unchanged)
+    significant_changes = [change for change in sentence_changes if change["type"] != "unchanged"]
+    report.append(f"Total Changes: {len(significant_changes)}")
+    
+    # Add all significant sentence changes
+    for i, change in enumerate(significant_changes[:10], 1):
+        report.append(f"\nChange {i}: {change['type']}")
+        if change["type"] == "replace" or change["type"] == "modified":
             report.append(f"Old: {change['old_sentence']}")
             report.append(f"New: {change['new_sentence']}")
-        elif change["type"] == "delete":
+        elif change["type"] == "deleted":
             report.append(f"Deleted: {change['old_sentence']}")
-        elif change["type"] == "insert":
+        elif change["type"] == "added":
             report.append(f"Added: {change['new_sentence']}")
     
     return "\n".join(report)
@@ -233,38 +238,65 @@ def generate_csv_analysis_report(analysis_results: Dict[str, Any]) -> str:
     Returns:
         str: Generated CSV report
     """
-    # Create DataFrames for different sections
+    # Create a DataFrame for the report
+    data = {
+        "Category": [],
+        "Metric": [],
+        "Value": []
+    }
     
-    # Sentiment DataFrame
-    sentiment_df = pd.DataFrame([analysis_results["sentiment"]])
+    # Add sentiment analysis
+    sentiment = analysis_results["sentiment"]
+    data["Category"].extend(["Sentiment"] * 4)
+    data["Metric"].extend(["Positive", "Negative", "Neutral", "Compound"])
+    data["Value"].extend([
+        f"{sentiment['positive']:.2f}",
+        f"{sentiment['negative']:.2f}",
+        f"{sentiment['neutral']:.2f}",
+        f"{sentiment['compound']:.2f}"
+    ])
     
-    # Intent DataFrame
-    intent_df = pd.DataFrame([analysis_results["intent"]])
+    # Add intent analysis
+    intent = analysis_results["intent"]
+    data["Category"].extend(["Intent"] * 3)
+    data["Metric"].extend(["Overall Intent", "Hawkish Score", "Dovish Score"])
+    data["Value"].extend([
+        intent["overall_intent"].upper(),
+        f"{intent['hawkish_score']:.2f}",
+        f"{intent['dovish_score']:.2f}"
+    ])
     
-    # Key Phrases DataFrame
-    key_phrases_df = pd.DataFrame({
-        "key_phrase": analysis_results["key_phrases"]
-    })
+    # Add hawkish and dovish terms if available
+    if 'hawkish_terms_found' in intent:
+        data["Category"].append("Intent")
+        data["Metric"].append("Hawkish Terms Found")
+        data["Value"].append(str(intent["hawkish_terms_found"]))
     
-    # Metadata DataFrame
-    metadata_df = pd.DataFrame([analysis_results["metadata"]])
+    if 'dovish_terms_found' in intent:
+        data["Category"].append("Intent")
+        data["Metric"].append("Dovish Terms Found")
+        data["Value"].append(str(intent["dovish_terms_found"]))
     
-    # Combine all DataFrames into a single CSV
-    csv_parts = [
-        "SENTIMENT ANALYSIS",
-        sentiment_df.to_csv(index=False),
-        "",
-        "INTENT ANALYSIS",
-        intent_df.to_csv(index=False),
-        "",
-        "KEY PHRASES",
-        key_phrases_df.to_csv(index=False),
-        "",
-        "DOCUMENT METADATA",
-        metadata_df.to_csv(index=False)
-    ]
+    # Add key phrases
+    key_phrases = analysis_results["key_phrases"]
+    for i, phrase in enumerate(key_phrases, 1):
+        data["Category"].append("Key Phrases")
+        data["Metric"].append(f"Phrase {i}")
+        data["Value"].append(phrase)
     
-    return "\n".join(csv_parts)
+    # Add metadata
+    metadata = analysis_results["metadata"]
+    data["Category"].extend(["Metadata"] * 3)
+    data["Metric"].extend(["Token Count", "Sentence Count", "Average Sentence Length"])
+    data["Value"].extend([
+        str(metadata["token_count"]),
+        str(metadata["sentence_count"]),
+        f"{metadata['average_sentence_length']:.2f}"
+    ])
+    
+    # Create DataFrame and convert to CSV
+    df = pd.DataFrame(data)
+    return df.to_csv(index=False)
 
 
 def generate_csv_comparison_report(comparison_results: Dict[str, Any]) -> str:
@@ -356,57 +388,118 @@ def generate_html_analysis_report(analysis_results: Dict[str, Any]) -> str:
     Returns:
         str: Generated HTML report
     """
-    # Create DataFrames for different sections
+    # Start HTML content
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Iceberg Analysis Report</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; }
+            h1 { color: #2c3e50; }
+            h2 { color: #3498db; margin-top: 30px; }
+            table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+            th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
+            th { background-color: #f2f2f2; }
+            .metric { font-weight: bold; }
+            .value { color: #2c3e50; }
+            .positive { color: green; }
+            .negative { color: red; }
+            .neutral { color: gray; }
+        </style>
+    </head>
+    <body>
+        <h1>Iceberg Analysis Report</h1>
+    """
     
-    # Sentiment DataFrame
-    sentiment_df = pd.DataFrame([analysis_results["sentiment"]])
+    # Add sentiment analysis
+    sentiment = analysis_results["sentiment"]
+    html += """
+        <h2>Sentiment Analysis</h2>
+        <table>
+            <tr><th>Metric</th><th>Value</th></tr>
+            <tr><td class="metric">Positive</td><td class="value positive">{:.2f}</td></tr>
+            <tr><td class="metric">Negative</td><td class="value negative">{:.2f}</td></tr>
+            <tr><td class="metric">Neutral</td><td class="value neutral">{:.2f}</td></tr>
+            <tr><td class="metric">Compound</td><td class="value">{:.2f}</td></tr>
+        </table>
+    """.format(
+        sentiment["positive"],
+        sentiment["negative"],
+        sentiment["neutral"],
+        sentiment["compound"]
+    )
     
-    # Intent DataFrame
-    intent_df = pd.DataFrame([analysis_results["intent"]])
+    # Add intent analysis
+    intent = analysis_results["intent"]
+    html += """
+        <h2>Intent Analysis</h2>
+        <table>
+            <tr><th>Metric</th><th>Value</th></tr>
+            <tr><td class="metric">Overall Intent</td><td class="value">{}</td></tr>
+            <tr><td class="metric">Hawkish Score</td><td class="value">{:.2f}</td></tr>
+            <tr><td class="metric">Dovish Score</td><td class="value">{:.2f}</td></tr>
+    """.format(
+        intent["overall_intent"].upper(),
+        intent["hawkish_score"],
+        intent["dovish_score"]
+    )
     
-    # Key Phrases DataFrame
-    key_phrases_df = pd.DataFrame({
-        "key_phrase": analysis_results["key_phrases"]
-    })
+    # Add hawkish and dovish terms if available
+    if 'hawkish_terms_found' in intent:
+        html += """
+            <tr><td class="metric">Hawkish Terms Found</td><td class="value">{}</td></tr>
+        """.format(intent["hawkish_terms_found"])
     
-    # Metadata DataFrame
-    metadata_df = pd.DataFrame([analysis_results["metadata"]])
+    if 'dovish_terms_found' in intent:
+        html += """
+            <tr><td class="metric">Dovish Terms Found</td><td class="value">{}</td></tr>
+        """.format(intent["dovish_terms_found"])
     
-    # Generate HTML
-    html_parts = [
-        "<html>",
-        "<head>",
-        "<title>Text Analysis Report</title>",
-        "<style>",
-        "body { font-family: Arial, sans-serif; margin: 20px; }",
-        "h1 { color: #2c3e50; }",
-        "h2 { color: #3498db; }",
-        "table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }",
-        "th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }",
-        "th { background-color: #f2f2f2; }",
-        "tr:nth-child(even) { background-color: #f9f9f9; }",
-        "</style>",
-        "</head>",
-        "<body>",
-        "<h1>Text Analysis Report</h1>",
-        
-        "<h2>Sentiment Analysis</h2>",
-        sentiment_df.to_html(index=False),
-        
-        "<h2>Intent Analysis</h2>",
-        intent_df.to_html(index=False),
-        
-        "<h2>Key Phrases</h2>",
-        key_phrases_df.to_html(index=False),
-        
-        "<h2>Document Metadata</h2>",
-        metadata_df.to_html(index=False),
-        
-        "</body>",
-        "</html>"
-    ]
+    html += """
+        </table>
+    """
     
-    return "\n".join(html_parts)
+    # Add key phrases
+    key_phrases = analysis_results["key_phrases"]
+    html += """
+        <h2>Key Phrases</h2>
+        <table>
+            <tr><th>#</th><th>Phrase</th></tr>
+    """
+    
+    for i, phrase in enumerate(key_phrases, 1):
+        html += """
+            <tr><td>{}</td><td>{}</td></tr>
+        """.format(i, phrase)
+    
+    html += """
+        </table>
+    """
+    
+    # Add metadata
+    metadata = analysis_results["metadata"]
+    html += """
+        <h2>Document Metadata</h2>
+        <table>
+            <tr><th>Metric</th><th>Value</th></tr>
+            <tr><td class="metric">Token Count</td><td class="value">{}</td></tr>
+            <tr><td class="metric">Sentence Count</td><td class="value">{}</td></tr>
+            <tr><td class="metric">Average Sentence Length</td><td class="value">{:.2f} tokens</td></tr>
+        </table>
+    """.format(
+        metadata["token_count"],
+        metadata["sentence_count"],
+        metadata["average_sentence_length"]
+    )
+    
+    # Close HTML
+    html += """
+    </body>
+    </html>
+    """
+    
+    return html
 
 
 def generate_html_comparison_report(comparison_results: Dict[str, Any]) -> str:

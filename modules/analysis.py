@@ -7,7 +7,9 @@ intent detection, and text comparison.
 
 import logging
 import difflib
-import spacy
+import nltk
+from nltk.tokenize import word_tokenize, sent_tokenize
+from nltk.sentiment import SentimentIntensityAnalyzer
 from typing import Dict, List, Any, Tuple
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -20,13 +22,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load spaCy model
+# Download NLTK resources
 try:
-    nlp = spacy.load("en_core_web_sm")
-except OSError:
-    logging.warning("Spacy model not found. Downloading en_core_web_sm...")
-    spacy.cli.download("en_core_web_sm")
-    nlp = spacy.load("en_core_web_sm")
+    nltk.data.find('sentiment/vader_lexicon')
+except LookupError:
+    nltk.download('vader_lexicon')
+
+# Initialize sentiment analyzer
+sia = SentimentIntensityAnalyzer()
 
 
 def analyze_text(processed_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -127,31 +130,15 @@ def analyze_sentiment(processed_data: Dict[str, Any]) -> Dict[str, float]:
     Returns:
         Dict: Dictionary containing sentiment scores
     """
-    # Use spaCy for basic sentiment analysis
-    # Note: For more advanced sentiment analysis, consider using a dedicated library like VADER or TextBlob
-    
-    doc = processed_data.get("doc")
-    if not doc:
-        doc = nlp(processed_data["cleaned_text"])
-    
-    # Calculate positive, negative, and neutral scores based on token attributes
-    positive_words = ["increase", "growth", "strong", "robust", "improve", "positive", "recovery", "expand"]
-    negative_words = ["decrease", "decline", "weak", "deteriorate", "negative", "contraction", "recession"]
-    
-    positive_count = sum(1 for token in doc if token.lemma_.lower() in positive_words)
-    negative_count = sum(1 for token in doc if token.lemma_.lower() in negative_words)
-    total_count = len([token for token in doc if token.is_alpha])
-    
-    positive_score = positive_count / total_count if total_count > 0 else 0
-    negative_score = negative_count / total_count if total_count > 0 else 0
-    neutral_score = 1 - (positive_score + negative_score)
-    compound_score = positive_score - negative_score
+    # Use NLTK's VADER for sentiment analysis
+    text = processed_data["cleaned_text"]
+    sentiment_scores = sia.polarity_scores(text)
     
     return {
-        "positive": positive_score,
-        "negative": negative_score,
-        "neutral": neutral_score,
-        "compound": compound_score
+        "positive": sentiment_scores["pos"],
+        "negative": sentiment_scores["neg"],
+        "neutral": sentiment_scores["neu"],
+        "compound": sentiment_scores["compound"]
     }
 
 
@@ -199,9 +186,7 @@ def analyze_intent(processed_data: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "hawkish_score": hawkish_score,
         "dovish_score": dovish_score,
-        "overall_intent": overall_intent,
-        "hawkish_terms_found": hawkish_count,
-        "dovish_terms_found": dovish_count
+        "overall_intent": overall_intent
     }
 
 
@@ -215,15 +200,21 @@ def extract_key_phrases(processed_data: Dict[str, Any]) -> List[str]:
     Returns:
         List: List of key phrases
     """
-    doc = processed_data.get("doc")
-    if not doc:
-        doc = nlp(processed_data["cleaned_text"])
+    # Use a simple frequency-based approach to extract key phrases
+    # For more advanced key phrase extraction, consider using TextRank or other algorithms
     
-    # Extract noun phrases as key phrases
-    key_phrases = [chunk.text for chunk in doc.noun_chunks if len(chunk.text.split()) > 1]
+    # Get tokens and remove stopwords
+    tokens = processed_data["tokens"]
+    stopwords = set(nltk.corpus.stopwords.words('english'))
     
-    # Limit to top 10 phrases
-    return key_phrases[:10]
+    # Filter out stopwords and short words
+    filtered_tokens = [token.lower() for token in tokens if token.lower() not in stopwords and len(token) > 3]
+    
+    # Count frequencies
+    freq_dist = nltk.FreqDist(filtered_tokens)
+    
+    # Return top 10 most common words as key phrases
+    return [word for word, _ in freq_dist.most_common(10)]
 
 
 def calculate_similarity(processed_data1: Dict[str, Any], processed_data2: Dict[str, Any]) -> Dict[str, float]:
@@ -250,10 +241,13 @@ def calculate_similarity(processed_data1: Dict[str, Any], processed_data2: Dict[
     tokens2 = set(processed_data2["tokens"])
     jaccard_similarity = len(tokens1.intersection(tokens2)) / len(tokens1.union(tokens2)) if tokens1 or tokens2 else 0
     
+    # Calculate overall similarity score (weighted average)
+    overall_similarity = 0.7 * tfidf_similarity + 0.3 * jaccard_similarity
+    
     return {
-        "tfidf_similarity": float(tfidf_similarity),
+        "tfidf_similarity": tfidf_similarity,
         "jaccard_similarity": jaccard_similarity,
-        "overall_similarity": (float(tfidf_similarity) + jaccard_similarity) / 2
+        "overall_similarity": overall_similarity
     }
 
 
@@ -268,38 +262,56 @@ def identify_sentence_changes(sentences1: List[str], sentences2: List[str]) -> L
     Returns:
         List: List of dictionaries containing sentence change information
     """
-    # Use difflib to identify sentence-level changes
+    # Use difflib to find differences between sentences
     matcher = difflib.SequenceMatcher(None, sentences1, sentences2)
+    
     changes = []
     
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == 'replace':
-            for i in range(i1, i2):
-                for j in range(j1, j2):
-                    changes.append({
-                        "type": "replace",
-                        "old_sentence": sentences1[i],
-                        "new_sentence": sentences2[j],
-                        "old_index": i,
-                        "new_index": j
-                    })
-        elif tag == 'delete':
+        if tag == 'equal':
+            # Sentences are the same, no change
             for i in range(i1, i2):
                 changes.append({
-                    "type": "delete",
-                    "old_sentence": sentences1[i],
-                    "new_sentence": None,
+                    "type": "unchanged",
                     "old_index": i,
-                    "new_index": None
+                    "new_index": j1 + (i - i1),
+                    "old_sentence": sentences1[i],
+                    "new_sentence": sentences1[i]
+                })
+        elif tag == 'replace':
+            # Sentences were replaced
+            for i, j in zip(range(i1, i2), range(j1, j2)):
+                # Calculate similarity between the sentences
+                sentence_matcher = difflib.SequenceMatcher(None, sentences1[i], sentences2[j])
+                similarity = sentence_matcher.ratio()
+                
+                changes.append({
+                    "type": "modified",
+                    "old_index": i,
+                    "new_index": j,
+                    "old_sentence": sentences1[i],
+                    "new_sentence": sentences2[j],
+                    "similarity": similarity
+                })
+        elif tag == 'delete':
+            # Sentences were deleted
+            for i in range(i1, i2):
+                changes.append({
+                    "type": "deleted",
+                    "old_index": i,
+                    "new_index": None,
+                    "old_sentence": sentences1[i],
+                    "new_sentence": None
                 })
         elif tag == 'insert':
+            # Sentences were inserted
             for j in range(j1, j2):
                 changes.append({
-                    "type": "insert",
-                    "old_sentence": None,
-                    "new_sentence": sentences2[j],
+                    "type": "added",
                     "old_index": None,
-                    "new_index": j
+                    "new_index": j,
+                    "old_sentence": None,
+                    "new_sentence": sentences2[j]
                 })
     
     return changes
@@ -316,27 +328,30 @@ def identify_phrase_changes(text1: str, text2: str) -> Dict[str, Any]:
     Returns:
         Dict: Dictionary containing phrase change information
     """
-    # Generate a unified diff
-    diff = difflib.unified_diff(
+    # Use difflib to generate a unified diff
+    diff = list(difflib.unified_diff(
         text1.splitlines(),
         text2.splitlines(),
         lineterm='',
         n=0
-    )
+    ))
     
-    # Parse the diff to extract additions and deletions
+    # Process the diff to extract changes
     additions = []
     deletions = []
     
-    for line in diff:
-        if line.startswith('+') and not line.startswith('+++'):
+    for line in diff[2:]:  # Skip the first two lines (diff header)
+        if line.startswith('+'):
             additions.append(line[1:])
-        elif line.startswith('-') and not line.startswith('---'):
+        elif line.startswith('-'):
             deletions.append(line[1:])
+    
+    # Calculate statistics
+    total_changes = len(additions) + len(deletions)
     
     return {
         "additions": additions,
         "deletions": deletions,
-        "addition_count": len(additions),
-        "deletion_count": len(deletions)
+        "total_changes": total_changes,
+        "diff_summary": '\n'.join(diff)
     }
